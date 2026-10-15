@@ -16,6 +16,18 @@ REVIEW_NOTE = "审核备注"
 APPROVED_VALUES = {"已确认", "通过", "approved"}
 
 
+def _lineage_digest(data):
+    """来源页、工作表、行号不可在复核过程中悄然删改。"""
+    values = [
+        "|".join((
+            str(r["source_file"]), str(r["source_sheet"]),
+            str(int(r["source_page"])), str(int(r["source_row"]))
+        ))
+        for _, r in data.iterrows()
+    ]
+    return hashlib.sha256("\n".join(sorted(values)).encode("utf-8")).hexdigest()
+
+
 def export_review_workbook(data, origins, output_dir):
     validate_standard_frame(data)
     folder = Path(output_dir)
@@ -63,6 +75,7 @@ def export_review_workbook(data, origins, output_dir):
         "require_review": int(data["review_required"].fillna(False).astype(bool).sum()),
         "sources": origins,
         "workbook_sha256": hashlib.sha256(outfile.read_bytes()).hexdigest(),
+        "origin_lineage_sha256": _lineage_digest(data),
         "note": "需逐笔核对原件。将全部审核状态改为 已确认 后，才可使用 --reviewed-xlsx 导入；本文件不具备数字签名功能。",
     }
     manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -95,6 +108,14 @@ def read_approved_workbook(path):
     if not records:
         raise ValueError("复核表没有交易记录")
     data = pd.DataFrame(records, columns=STANDARD_COLUMNS)
+    manifest = Path(path).with_name("recognition_manifest.json")
+    if not manifest.is_file():
+        raise ValueError("缺少识别清单对应的 recognition_manifest.json，无法验证来源完整性")
+    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    if len(data) != metadata.get("rows"):
+        raise ValueError("复核交易行数与原始识别清单不一致；不可直接删除未确认交易")
+    if _lineage_digest(data) != metadata.get("origin_lineage_sha256"):
+        raise ValueError("复核清单的原始文件、页码或行号被修改，拒绝进入审核")
     # 人工逐笔确认后解除待审核标记；保留来源方式与结构评分。
     data["review_required"] = False
     validate_standard_frame(data)

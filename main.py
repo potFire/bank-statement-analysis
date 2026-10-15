@@ -24,12 +24,22 @@ def analyze(file_path, company_name, output_dir, config=None, bank="auto", profi
     else:
         if not file_path:
             raise ValueError("请输入银行流水文件，或提供 --reviewed-xlsx")
-        data, quality = processor.process_all(file_path)
-        needs_review = quality["review_required_records"] > 0
+        processor.read_excel(file_path)
+        processor.standardize_columns()
+        needs_review = bool(processor.raw_data["review_required"].fillna(False).astype(bool).any())
         if needs_review or review_only:
-            review_path = export_review_workbook(data, quality["sources"], output_dir)
+            # 用原始规范化数据生成清单，不能先丢弃 OCR 无法识别的日期或金额。
+            review_path = export_review_workbook(
+                processor.raw_data, processor.import_sources, output_dir
+            )
             if review_only or (needs_review and not allow_unreviewed):
                 return str(review_path)
+        processor.clean_data()
+        data, quality = processor.processed_data, processor.check_data_quality()
+        if needs_review and allow_unreviewed and (
+            quality["invalid_dates"] or quality["invalid_amounts_rows"]
+        ):
+            raise ValueError("存在无效的识别交易，必须先在复核清单中修正，不能生成遗漏交易的草稿报告")
         quality["review_status"] = (
             "UNREVIEWED_DRAFT" if needs_review else "excel_rule_processed"
         )
