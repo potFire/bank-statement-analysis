@@ -1,8 +1,8 @@
-"""多格式银行流水导入：Excel、文字 PDF、扫描 PDF、图片 -> 统一 DataFrame。
+"""多格式银行流水导入：Excel、PDF、图片 -> 统一 DataFrame。
 
-文字型 PDF 优先从可选择的表格文本直接抽取；没有可识别表格时，
-文本交给 LLM，扫描 PDF 和图片交给视觉 LLM。
-所有非 Excel 提取的记录均标记为待人工复核。
+所有 PDF（包括文字型和扫描件）必须逐页渲染，再由视觉大模型识别。
+PyMuPDF 仅用于 PDF 分页与渲染，不做表格结构识别或直接生成交易。
+PDF/图片记录均标记为待人工复核，不直接进入正式信贷分析。
 """
 from io import BytesIO
 from pathlib import Path
@@ -10,7 +10,7 @@ import pandas as pd
 import fitz
 from PIL import Image, ImageOps
 
-from bank_adapters import AdapterRegistry, StatementImporter, _find_header
+from bank_adapters import AdapterRegistry, StatementImporter
 from statement_schema import validate_standard_frame
 from vision_llm import validate_extraction
 
@@ -127,8 +127,9 @@ class UniversalStatementImporter:
     def _requires_llm(self, path, page):
         if self.llm_client is None:
             raise ValueError(
-                f"{path.name} 第 {page} 页无法可靠地直接提取流水；"
-                "请配置本地视觉 LLM，或改用可识别的 Excel 文件"
+                f"{path.name} 第 {page} 页必须通过视觉大模型识别；"
+                "请配置 --llm-url 和 --llm-model（建议本地部署），"
+                "PDF 不再使用本地表格解析绕过模型"
             )
 
     def _model_result(self, value, path, source_index, page, method, hint):
@@ -147,85 +148,51 @@ class UniversalStatementImporter:
         )
         return [data], [origin]
 
-    def _extract_pdf_tables(self, page, path, source_index, page_no, hint):
-        data, origins = [], []
-        try:
-            tables = page.find_tables()
-        except (AttributeError, ValueError, RuntimeError):
-            return [], []
-        for table_no, table in enumerate(tables.tables, start=1):
-            cells = table.extract()
-            if not cells:
-                continue
-            row_idx = _find_header(pd.DataFrame(cells), self.registry.adapters.values())
-            if row_idx is None or row_idx >= len(cells) - 1:
-                continue
-            columns = [str(v).strip() if v is not None else "" for v in cells[row_idx]]
-            if any(not item for item in columns) or len(set(columns)) != len(columns):
-                continue
-            rows = [r for r in cells[row_idx + 1:] if r and any(
-                v is not None and str(v).strip() for v in r)]
-            if not rows:
-                continue
-            try:
-                frame, origin = self._convert(
-                    columns, rows, path, source_index, page_no,
-                    table_no, "pdf_text_table", hint,
-                )
-            except (ValueError, KeyError):
-                return [], []
-            if frame is None or origin["recognition_score"] < 0.85:
-                return [], []
-            data.append(frame)
-            origins.append(origin)
-        return data, origins
-
     def _read_pdf(self, path, source_index):
+        """所有 PDF 页面均调用视觉模型，含有文本层的 PDF 也不能绕过。
+
+        逐页渲染为 PNG 以适配 OpenAI-compatible vision 接口。
+        每页模型结果必须是合法 JSON，任何一页失败则整份导入失败，
+        防止漏页后继续生成不完整的流水分析。
+        """
+        self._requires_llm(path, 1)
         frames, origins = [], []
         with fitz.open(path) as document:
             if document.needs_pass:
                 raise ValueError(f"PDF 已加密，需授权解密：{path.name}")
             if len(document) > self.max_pages:
-                raise ValueError(f"{path.name} 有 {len(document)} 页，超过最大 {self.max_pages} 页限制")
-            for page_index in range(len(document)):
-                page = document[page_index]
-                page_num = page_index + 1
-                text = page.get_text("text")
-                hint = path.stem + " " + text[:500]
-                found, sources = self._extract_pdf_tables(
-                    page, path, source_index, page_num, hint
+                raise ValueError(
+                    f"{path.name} 有 {len(document)} 页，超过最大 {self.max_pages} 页限制"
                 )
-                if found:
-                    frames.extend(found)
-                    origins.extend(sources)
-                    continue
-                # 真正空白页可跳过，记录在识别追踪中。
-                if not text.strip() and not page.get_images() and not page.get_drawings():
-                    origins.append({
-                        "file": path.name, "page": page_num, "source_type": "pdf",
-                        "extraction_method": "blank", "records": 0,
-                        "review_required": True, "recognition_score": 0.0,
-                        "notes": "PDF 空白页",
-                    })
-                    continue
-                self._requires_llm(path, page_num)
-                if len(text.strip()) >= 100:
-                    value = self.llm_client.extract_text(text)
-                    detected, sources = self._model_result(
-                        value, path, source_index, page_num, "llm_pdf_text", hint
+            if not document.page_count:
+                raise ValueError(f"PDF 没有可识别页面：{path.name}")
+            for page_index in range(document.page_count):
+                page = document[page_index]
+                page_number = page_index + 1
+                # 约 200 DPI。仅渲染图像，不调用 find_tables/get_text 判断交易。
+                pixmap = page.get_pixmap(
+                    matrix=fitz.Matrix(200 / 72, 200 / 72), alpha=False
+                )
+                with Image.open(BytesIO(pixmap.tobytes("png"))) as page_image:
+                    png_bytes = image_as_png(page_image)
+                try:
+                    result = self.llm_client.extract_image(png_bytes, "image/png")
+                    detected, page_sources = self._model_result(
+                        result, path, source_index, page_number,
+                        "llm_pdf_vision", path.stem
                     )
-                else:
-                    pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                    with Image.open(BytesIO(pixmap.tobytes("png"))) as image:
-                        png = image_as_png(image)
-                    value = self.llm_client.extract_image(png)
-                    detected, sources = self._model_result(
-                        value, path, source_index, page_num, "llm_pdf_vision", hint
-                    )
+                except Exception as exc:
+                    # 不输出敏感模型内容；注明失败页以便排障及重新处理。
+                    raise ValueError(
+                        f"PDF 视觉识别失败：{path.name} 第 {page_number} 页，"
+                        f"异常类型 {type(exc).__name__}，本次导入中止"
+                    ) from None
                 frames.extend(detected)
-                origins.extend(sources)
+                origins.extend(page_sources)
         if not frames:
-            raise ValueError(f"未从 {path.name} 识别出可分析交易")
+            raise ValueError(
+                f"视觉模型未在 {path.name} 中识别出任何交易，请逐页核实原始文件"
+            )
         return frames, origins
 
     def _read_image(self, path, source_index):
