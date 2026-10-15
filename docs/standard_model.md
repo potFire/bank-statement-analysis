@@ -4,7 +4,7 @@
 
 | 标准字段 | 类型（清洗后） | 说明 |
 | --- | --- | --- |
-| 银行编码 | string | 如 ABC/ICBC/CCB/GENERIC/自定义编码 |
+| 银行编码 | string | ABC/ICBC/CCB/自定义编码；无法识别时自动赋予 GENERIC_SOURCE_文件序号_SHEET_工作表序号（防止误合并） |
 | 银行名称 | string | 银行中文名称 |
 | 账号 | string | 本方账号；Excel 无账号时使用带文件和 Sheet 标识的占位值，不跨文件合并 |
 | 账户户名 | string | 本方户名 |

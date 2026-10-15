@@ -167,3 +167,20 @@ def test_lineage_on_risk(tmp_path):
     assert [(r["file"], r["row"]) for r in returns[0]["source_refs"]] == [
         ("农行.xlsx", 2), ("农行.xlsx", 3),
     ]
+
+
+def test_generic_files_do_not_merge_accounts(tmp_path):
+    first = workbook(
+        tmp_path / "one.xlsx",
+        ["交易日期", "账号", "贷方发生额", "借方发生额", "余额", "摘要"],
+        [["2026-02-01", "A", 100, 0, 100, "销售货款"]],
+    )
+    second = workbook(
+        tmp_path / "two.xlsx",
+        ["交易日期", "账号", "贷方发生额", "借方发生额", "余额", "摘要"],
+        [["2026-02-01", "A", 500, 0, 500, "销售货款"]],
+    )
+    data, q = DataProcessor().process_all([first, second])
+    assert len(data) == 2
+    assert data["银行编码"].nunique() == 2
+    assert q["balance_checked_pairs"] == 0
