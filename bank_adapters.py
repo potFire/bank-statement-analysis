@@ -153,7 +153,7 @@ class BankAdapter(ABC):
         df["source_file"] = metadata["source_file"]
         df["source_sheet"] = metadata["source_sheet"]
         df["source_row"] = np.arange(len(df), dtype="int64") + metadata["header_row"] + 2
-        result = df.loc[:, STANDARD_COLUMNS].copy()
+        result = df.loc[:, list(STANDARD_COLUMNS)].copy()
         validate_standard_frame(result)
         return result
 
@@ -203,6 +203,7 @@ class AdapterRegistry:
 
     def resolve(self, hint: str, requested: str = "auto") -> BankAdapter:
         if requested.lower() != "auto":
+            requested = requested.upper()
             if requested not in self.adapters:
                 raise ValueError("不存在银行模板: " + requested + "，可选：" + ",".join(self.adapters))
             return self.adapters[requested]
@@ -234,12 +235,17 @@ def _account_info(header_area: pd.DataFrame) -> dict:
     return info
 
 
-def _find_header(probe: pd.DataFrame) -> Optional[int]:
+def _find_header(probe: pd.DataFrame, adapters=None) -> Optional[int]:
     date_headers = {_normalize_header(x) for x in COMMON_ALIASES["交易日期"] + COMMON_ALIASES["交易时间"]}
     money_headers = {_normalize_header(x) for key in ("贷方发生额", "借方发生额", "交易金额")
                      for x in COMMON_ALIASES[key]}
     date_headers.update(["交易日期", "交易时间"])
     money_headers.update(["贷方发生额", "借方发生额", "交易金额"])
+    for adapter in adapters or []:
+        for key in ("交易日期", "交易时间"):
+            date_headers.update(_normalize_header(v) for v in adapter.profile.aliases.get(key, []))
+        for key in ("贷方发生额", "借方发生额", "交易金额"):
+            money_headers.update(_normalize_header(v) for v in adapter.profile.aliases.get(key, []))
     for idx, row in probe.iterrows():
         columns = {_normalize_header(cell) for cell in row if pd.notna(cell)}
         if columns & date_headers and columns & money_headers:
@@ -266,7 +272,7 @@ class StatementImporter:
             with pd.ExcelFile(path) as workbook:
                 for sheet in workbook.sheet_names:
                     preview = pd.read_excel(workbook, sheet_name=sheet, header=None, nrows=50, dtype=str)
-                    header_row = _find_header(preview)
+                    header_row = _find_header(preview, self.registry.adapters.values())
                     if header_row is None:
                         continue
                     pre = preview.iloc[:header_row]
