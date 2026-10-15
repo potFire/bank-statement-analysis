@@ -31,7 +31,9 @@ def find_risks(data, metrics, config=None):
                  "sheet": str(r.get("source_sheet", "")),
                  "row": int(r["source_row"]),
                  "account": str(r.get("账号", "")),
-                 "bank": str(r.get("银行编码", ""))}
+                 "bank": str(r.get("银行编码", "")),
+                 "page": int(r.get("source_page", 0) or 0),
+                 "method": str(r.get("extraction_method", ""))}
                 for r in txns]
         findings.append({
             "code": code, "level": level, "reason": reason,

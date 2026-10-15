@@ -21,13 +21,18 @@ class ReportGenerator:
   out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
   quality=quality or {};findings=findings or []
   metrics={k:v for k,v in metrics.items() if k!="classified_data"}
-  payload=scrub({"company":company_name,"generated_at":datetime.now().isoformat(timespec="seconds"),"quality":quality,"metrics":metrics,"findings":findings,"disclaimer":"规则仅用于发现疑点，不构成银行流水真实性鉴定或授信审批结论；未做外部交叉验证。"})
+  payload=scrub({"company":company_name,"generated_at":datetime.now().isoformat(timespec="seconds"),"quality":quality,"metrics":metrics,"findings":findings,"disclaimer":"规则仅用于发现待核查线索，不构成流水真实性鉴定或授信审批结论；PDF/图片识别需逐笔人工复核，未做外部交叉验证。"})
   (out/"analysis.json").write_text(json.dumps(payload,ensure_ascii=False,indent=2,default=safe),encoding="utf-8")
   doc=Document();doc.add_heading("银行信贷流水审核分析报告",0)
   doc.add_paragraph("企业："+company_name)
+  if quality.get("review_status") == "UNREVIEWED_DRAFT":
+   doc.add_paragraph("【未经人工复核，禁止直接用于信贷审批】",style="Subtitle")
   doc.add_paragraph(payload["disclaimer"])
   sections=[("数据质量",quality),("现金流",metrics.get("cash_flow",{})),("稳定性及季节性",metrics.get("stability",{}))]
-  md=["# 银行信贷流水审核分析报告","","企业："+company_name,"",payload["disclaimer"],""]
+  md=["# 银行信贷流水审核分析报告","","企业："+company_name,""]
+  if quality.get("review_status") == "UNREVIEWED_DRAFT":
+   md.append("【未经人工复核，禁止直接用于信贷审批】")
+  md.extend(["",payload["disclaimer"],""])
   for name,content in sections:
    doc.add_heading(name,level=1);md.extend(["## "+name,""])
    for key,value in content.items():
@@ -38,7 +43,7 @@ class ReportGenerator:
   doc.add_heading("风险线索（非事实认定）",level=1)
   md.extend(["## 风险线索（非事实认定）",""])
   for f in findings[:300]:
-   s=f"{f['level']} / {f['code']}: {f['reason']}，源行号 {f['source_rows']}，证据 {f['evidence']}"
+   s=f"{f['level']} / {f['code']}: {f['reason']}，原始来源 {f.get('source_refs', f['source_rows'])}，证据 {f['evidence']}"
    doc.add_paragraph(s,style="List Bullet");md.append("- "+s)
   if len(findings)>300:doc.add_paragraph("更多线索请查看 analysis.json")
   doc.add_heading("交易对手 TOP20",level=1)
