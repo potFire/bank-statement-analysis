@@ -1,118 +1,165 @@
-"""流水标准化与基础校验。保留原项目 DataProcessor 的接口。"""
-from pathlib import Path
-import pandas as pd
+"""统一数据模型的质量检查层；银行字段映射在 bank_adapters.py 完成。"""
+import re
 import numpy as np
+import pandas as pd
+from bank_adapters import StatementImporter
+from statement_schema import SCHEMA_VERSION, STANDARD_COLUMNS, MONEY_COLUMNS, validate_standard_frame
 
-ALIASES = {
- "交易日期":["交易日期","日期","date"],
- "账号":["账号","本方账号","银行账号","账户号码"],
- "开户行":["开户行","开户银行","银行名称"],
- "贷方发生额":["贷方发生额","贷方","收入","credit"],
- "借方发生额":["借方发生额","借方","支出","debit"],
- "余额":["余额","balance"],
- "对方账号":["对方账号","对方账户","对方帐号","对方帐户"],
- "对方户名":["对方户名","对方名称","对方单位"],
- "对方开户行":["对方开户行","对方行号","对方银行"],
- "交易用途":["交易用途","用途","摘要","备注"],
- "交易流水号":["交易流水号","交易序号","流水号","交易编号","凭证号"],
- "交易时间":["交易时间","交易时刻","记账时间","发生时间"]
-}
-REQUIRED = ["交易日期","贷方发生额","借方发生额","余额","交易用途"]
+
+def parse_date(value):
+    if pd.isna(value) or str(value).strip() == "":
+        return pd.NaT
+    value = str(value).strip()
+    if re.fullmatch(r"\d{8}", value):
+        return pd.to_datetime(value, format="%Y%m%d", errors="coerce")
+    if re.fullmatch(r"\d{1,5}", value) and 1 <= int(value) <= 80000:
+        return pd.to_datetime(int(value), unit="D", origin="1899-12-30", errors="coerce")
+    value = value.replace("年", "-").replace("月", "-").replace("日", "")
+    return pd.to_datetime(value, errors="coerce")
+
+
+def parse_timestamp(date, time):
+    """无法获知真实日内顺序时返回 NaT，防止错误的余额连续性判断。"""
+    if pd.isna(date):
+        return pd.NaT
+    clock = "" if pd.isna(time) else str(time).strip()
+    if not clock:
+        return date if date.hour or date.minute or date.second else pd.NaT
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?", clock):
+        return pd.to_datetime(f"{date.date()} {clock}", errors="coerce")
+    return pd.to_datetime(clock, errors="coerce")
+
 
 class DataProcessor:
- def __init__(self):
-  self.account_info={}
-  self.raw_data=None
-  self.processed_data=None
-  self.quality_report={}
+    def __init__(self, bank="auto", profile_path=None):
+        self.importer = StatementImporter(bank, profile_path)
+        self.raw_data = None
+        self.processed_data = None
+        self.account_info = {}
+        self.import_sources = []
+        self.quality_report = {}
 
- def read_excel(self,path):
-  path=Path(path)
-  if path.suffix.lower() not in (".xlsx",".xls"):
-   raise ValueError("仅支持 Excel 文件")
-  preview=pd.read_excel(path,header=None,dtype=str)
-  header=None
-  for idx,row in preview.head(50).iterrows():
-   if any(str(c).strip() in ALIASES["交易日期"] for c in row):
-    header=idx;break
-  if header is None: raise ValueError("无法定位流水表头")
-  pre=preview.iloc[:header].fillna("")
-  for _,row in pre.iterrows():
-   line=" ".join(str(v) for v in row if str(v).strip())
-   for target,keys in {"账号":["账号:","账号：","账户号码:"],"户名":["户名:","户名：","公司名称:"],"开户行":["开户行:","开户行："]}.items():
-    for key in keys:
-     if key in line and target not in self.account_info:
-      self.account_info[target]=line.split(key,1)[1].strip().split(" ")[0]
-  self.raw_data=pd.read_excel(path,header=header,dtype=str)
+    def read_excel(self, paths):
+        self.raw_data, self.import_sources = self.importer.read(paths)
+        self.account_info = self.import_sources[0]["account_info"] if len(self.import_sources) == 1 else {}
+        return self.raw_data
 
- def standardize_columns(self):
-  rename={}
-  for col in self.raw_data.columns:
-   for standard,names in ALIASES.items():
-    if str(col).strip().lower() in [s.lower() for s in names]:
-     rename[col]=standard;break
-  self.raw_data=self.raw_data.rename(columns=rename)
-  if len(set(self.raw_data.columns))!=len(self.raw_data.columns):
-   raise ValueError("映射后出现重复字段，请检查流水表头")
-  missing=[c for c in REQUIRED if c not in self.raw_data]
-  if missing: raise ValueError("缺少必要字段: "+",".join(missing))
-  if "账号" not in self.raw_data and self.account_info.get("账号"):
-   self.raw_data["账号"]=self.account_info["账号"]
-  if "账号" not in self.raw_data: self.raw_data["账号"]="UNSPECIFIED_ACCOUNT"
+    def standardize_columns(self):
+        validate_standard_frame(self.raw_data)
+        return self.raw_data
 
- def clean_data(self):
-  d=self.raw_data.copy()
-  self.quality_report={"original_count":int(len(d)),"invalid_dates":0,"invalid_amounts":0,"duplicate_rows":0,"missing_purpose":0,"missing_counterparty":0,"limitations":[]}
-  d["source_row"]=np.arange(len(d))+2
-  d["交易日期"]=pd.to_datetime(d["交易日期"],errors="coerce")
-  self.quality_report["invalid_dates"]=int(d["交易日期"].isna().sum())
-  d=d.dropna(subset=["交易日期"]).copy()
-  for col in ["贷方发生额","借方发生额","余额"]:
-   v=d[col].astype("string").str.replace(",","",regex=False).str.replace("￥","",regex=False).str.strip()
-   if col!="余额": v=v.fillna("0").replace("", "0")
-   d[col]=pd.to_numeric(v,errors="coerce")
-   self.quality_report["invalid_amounts"]+=int(d[col].isna().sum())
-  bad=d[["贷方发生额","借方发生额","余额"]].isna().any(axis=1)
-  self.quality_report["invalid_amounts_rows"]=int(bad.sum())
-  d=d.loc[~bad].copy()
-  for col in ["对方账号","对方户名","对方开户行","交易用途","开户行","交易流水号","交易时间"]:
-   if col not in d: d[col]=""
-   d[col]=d[col].fillna("").astype(str).str.strip()
-  d["账号"]=d["账号"].fillna("UNSPECIFIED_ACCOUNT").astype(str).str.strip()
-  self.quality_report["missing_purpose"]=int(d["交易用途"].eq("").sum())
-  self.quality_report["missing_counterparty"]=int(d["对方户名"].eq("").sum())
-  keys=["账号","交易日期","贷方发生额","借方发生额","余额","对方账号","对方户名","交易用途"]
-  if d["交易流水号"].ne("").any(): keys=["账号","交易流水号"]
-  duplicated=d.duplicated(subset=keys,keep="first")
-  self.quality_report["duplicate_rows"]=int(duplicated.sum())
-  # 不擅自删除重复交易；只在报告中标记，以避免合法同额交易丢失
-  d["疑似重复"]=duplicated
-  sort_cols=["账号","交易日期"]
-  if d["交易时间"].ne("").all(): sort_cols.append("交易时间")
-  if d["交易流水号"].ne("").all(): sort_cols.append("交易流水号")
-  else: self.quality_report["limitations"].append("同日交易缺少稳定序号，余额连续性可能无法可靠判定")
-  sort_cols.append("source_row")
-  self.processed_data=d.sort_values(sort_cols,kind="stable").reset_index(drop=True)
-  self.quality_report["valid_count"]=int(len(d))
+    def clean_data(self):
+        validate_standard_frame(self.raw_data)
+        d = self.raw_data.copy()
+        q = {
+            "schema_version": SCHEMA_VERSION, "sources": self.import_sources,
+            "original_count": len(d), "invalid_dates": 0,
+            "invalid_amounts_rows": 0, "duplicate_rows": 0,
+            "missing_purpose": 0, "missing_counterparty": 0,
+            "rejected_locations": [], "limitations": [
+                "候选经营收支需人工判定交易性质",
+                "同日交易无可验证顺序时，部分余额连续性检查会跳过",
+            ],
+        }
+        currencies = d["币种"].fillna("CNY").astype(str).str.strip().str.upper()
+        currencies = currencies.replace({"": "CNY", "人民币": "CNY", "元": "CNY", "RMB": "CNY"})
+        unsupported = sorted(set(currencies) - {"CNY"})
+        if unsupported:
+            raise ValueError("当前不支持非人民币流水及汇率换算: " + ",".join(unsupported))
+        d["币种"] = currencies
+        d["交易日期"] = d["交易日期"].map(parse_date)
+        invalid_date = d["交易日期"].isna()
+        q["invalid_dates"] = int(invalid_date.sum())
+        for col in MONEY_COLUMNS:
+            value = d[col].astype("string").str.replace(",", "", regex=False)
+            value = value.str.replace("￥", "", regex=False).str.replace("¥", "", regex=False).str.strip()
+            value = value.str.replace(r"^\((.+)\)$", r"-\1", regex=True)
+            if col != "余额":
+                value = value.fillna("0").replace("", "0")
+            d[col] = pd.to_numeric(value, errors="coerce")
+        invalid_money = (
+            d[list(MONEY_COLUMNS)].isna().any(axis=1)
+            | (d["贷方发生额"] < 0)
+            | (d["借方发生额"] < 0)
+            | ((d["贷方发生额"] > 0) & (d["借方发生额"] > 0))
+        )
+        q["invalid_amounts_rows"] = int(invalid_money.sum())
+        rejected = d[invalid_date | invalid_money]
+        q["rejected_locations"] = [
+            {"file": r.source_file, "sheet": r.source_sheet, "row": int(r.source_row)}
+            for r in rejected.head(200).itertuples()
+        ]
+        d = d.loc[~(invalid_date | invalid_money)].copy()
+        if d.empty:
+            raise ValueError("没有可分析的有效交易数据")
+        for col in ("银行编码", "银行名称", "账号", "账户户名", "开户行",
+                    "交易时间", "交易流水号", "对方账号", "对方户名", "对方开户行",
+                    "交易用途", "source_file", "source_sheet"):
+            d[col] = d[col].fillna("").astype(str).str.strip()
+        q["missing_purpose"] = int(d["交易用途"].eq("").sum())
+        q["missing_counterparty"] = int(d["对方户名"].eq("").sum())
+        duplicate_fields = ["银行编码", "账号", "币种", "交易日期", "贷方发生额",
+                            "借方发生额", "余额", "对方账号", "对方户名", "交易用途"]
+        has_id = d["交易流水号"].ne("")
+        d["疑似重复"] = False
+        d.loc[has_id, "疑似重复"] = d[has_id].duplicated(
+            subset=["银行编码", "账号", "币种", "交易流水号"], keep="first"
+        )
+        d.loc[~has_id, "疑似重复"] = d[~has_id].duplicated(
+            subset=duplicate_fields, keep="first"
+        )
+        q["duplicate_rows"] = int(d["疑似重复"].sum())
+        d["_交易日"] = d["交易日期"].dt.normalize()
+        d["_交易排序时间"] = [parse_timestamp(date, clock) for date, clock
+                             in zip(d["交易日期"], d["交易时间"])]
+        d = d.sort_values(
+            ["银行编码", "账号", "币种", "_交易日", "_交易排序时间",
+             "source_file", "source_sheet", "source_row"],
+            kind="stable", na_position="last"
+        ).reset_index(drop=True)
+        self.processed_data = d
+        q["valid_count"] = int(len(d))
+        self.quality_report = q
+        return d
 
- def check_data_quality(self):
-  d=self.processed_data
-  exceptions=[]
-  for account,g in d.groupby("账号",sort=False):
-   g=g.reset_index(drop=True)
-   for i in range(1,len(g)):
-    prev,cur=g.iloc[i-1],g.iloc[i]
-    if prev["交易日期"]==cur["交易日期"] and not (cur["交易时间"] and prev["交易时间"] or cur["交易流水号"] and prev["交易流水号"]):
-     continue
-    expected=prev["余额"]+cur["贷方发生额"]-cur["借方发生额"]
-    if abs(cur["余额"]-expected)>0.011:
-     exceptions.append({"account":account,"row":int(cur["source_row"]),"date":str(cur["交易日期"].date()),"expected":round(float(expected),2),"actual":round(float(cur["余额"]),2),"delta":round(float(cur["余额"]-expected),2)})
-  self.quality_report["balance_exceptions"]=exceptions
-  self.quality_report["balance_error_count"]=len(exceptions)
-  return self.quality_report
+    def check_data_quality(self):
+        errors, checked, skipped = [], 0, 0
+        for (bank, account, currency), group in self.processed_data.groupby(
+                ["银行编码", "账号", "币种"], sort=False):
+            g = group.reset_index(drop=True)
+            day_counts = g.groupby("_交易日").size()
+            ordered_day = {
+                day: bool(part["_交易排序时间"].notna().all()
+                          and part["_交易排序时间"].is_unique)
+                for day, part in g.groupby("_交易日")
+            }
+            for i in range(1, len(g)):
+                prev, cur = g.iloc[i - 1], g.iloc[i]
+                pd_, cd_ = prev["_交易日"], cur["_交易日"]
+                # 前一日或本日存在同日多笔且缺序号，不能确定跨日比较的端点。
+                if (day_counts[pd_] > 1 and not ordered_day[pd_]) or (
+                        day_counts[cd_] > 1 and not ordered_day[cd_]):
+                    skipped += 1
+                    continue
+                checked += 1
+                expected = prev["余额"] + cur["贷方发生额"] - cur["借方发生额"]
+                if abs(float(cur["余额"] - expected)) > 0.011:
+                    errors.append({
+                        "bank": bank, "account": account, "currency": currency,
+                        "source_file": cur["source_file"], "source_sheet": cur["source_sheet"],
+                        "row": int(cur["source_row"]), "date": str(cur["_交易日"].date()),
+                        "expected": round(float(expected), 2),
+                        "actual": round(float(cur["余额"]), 2),
+                        "delta": round(float(cur["余额"] - expected), 2),
+                    })
+        self.quality_report.update({
+            "balance_exceptions": errors, "balance_error_count": len(errors),
+            "balance_checked_pairs": checked, "balance_unverifiable_pairs": skipped,
+        })
+        return self.quality_report
 
- def process_all(self,path):
-  self.read_excel(path)
-  self.standardize_columns()
-  self.clean_data()
-  return self.processed_data,self.check_data_quality()
+    def process_all(self, paths):
+        self.read_excel(paths)
+        self.standardize_columns()
+        self.clean_data()
+        return self.processed_data, self.check_data_quality()
