@@ -2,7 +2,7 @@
 import re
 import numpy as np
 import pandas as pd
-from bank_adapters import StatementImporter
+from document_ingest import UniversalStatementImporter
 from statement_schema import SCHEMA_VERSION, STANDARD_COLUMNS, MONEY_COLUMNS, validate_standard_frame
 
 
@@ -31,8 +31,8 @@ def parse_timestamp(date, time):
 
 
 class DataProcessor:
-    def __init__(self, bank="auto", profile_path=None):
-        self.importer = StatementImporter(bank, profile_path)
+    def __init__(self, bank="auto", profile_path=None, llm_client=None, max_pages=200):
+        self.importer = UniversalStatementImporter(bank, profile_path, llm_client, max_pages)
         self.raw_data = None
         self.processed_data = None
         self.account_info = {}
@@ -54,6 +54,9 @@ class DataProcessor:
         q = {
             "schema_version": SCHEMA_VERSION, "sources": self.import_sources,
             "original_count": len(d), "invalid_dates": 0,
+            "review_required_records": int(d["review_required"].fillna(False).astype(bool).sum()),
+            "llm_extracted_records": int(d["extraction_method"].astype(str).str.startswith("llm_").sum()),
+            "recognition_score_min": float(d["recognition_score"].min()),
             "invalid_amounts_rows": 0, "duplicate_rows": 0,
             "missing_purpose": 0, "missing_counterparty": 0,
             "rejected_locations": [], "limitations": [
@@ -157,6 +160,16 @@ class DataProcessor:
             "balance_checked_pairs": checked, "balance_unverifiable_pairs": skipped,
         })
         return self.quality_report
+
+    def process_standard_frame(self, frame, sources=None):
+        """已由人工复核的标准表格从这里进入相同的质量/指标分析流程。"""
+        self.raw_data = frame.copy()
+        self.import_sources = sources or [{"source_type": "reviewed_workbook", "review_required": False}]
+        self.standardize_columns()
+        self.clean_data()
+        self.quality_report["review_status"] = "user_attested_approved"
+        self.quality_report["review_required_records"] = 0
+        return self.processed_data, self.check_data_quality()
 
     def process_all(self, paths):
         self.read_excel(paths)
