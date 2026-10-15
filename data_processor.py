@@ -130,6 +130,9 @@ class DataProcessor:
         for (bank, account, currency), group in self.processed_data.groupby(
                 ["银行编码", "账号", "币种"], sort=False):
             g = group.reset_index(drop=True)
+            if str(account).startswith("UNSPECIFIED:"):
+                skipped += max(0, len(g) - 1)
+                continue
             day_counts = g.groupby("_交易日").size()
             ordered_day = {
                 day: bool(part["_交易排序时间"].notna().all()
@@ -167,6 +170,8 @@ class DataProcessor:
         self.import_sources = sources or [{"source_type": "reviewed_workbook", "review_required": False}]
         self.standardize_columns()
         self.clean_data()
+        if self.quality_report["invalid_dates"] or self.quality_report["invalid_amounts_rows"]:
+            raise ValueError("人工复核表仍存在无法解析的交易日期或金额，请修正后重新导入")
         self.quality_report["review_status"] = "user_attested_approved"
         self.quality_report["review_required_records"] = 0
         return self.processed_data, self.check_data_quality()
