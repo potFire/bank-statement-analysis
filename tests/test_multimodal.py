@@ -101,7 +101,7 @@ def test_scanned_pdf_vision_flow(tmp_path):
     assert report["review_required_records"] == 2
 
 
-def test_text_pdf_llm_flow(tmp_path):
+def test_text_based_pdf_also_uses_vision_llm(tmp_path):
     document = fitz.open()
     page = document.new_page()
     page.insert_textbox(
@@ -116,12 +116,13 @@ def test_text_pdf_llm_flow(tmp_path):
     stub = FakeVisionLLM()
     data, report = DataProcessor(llm_client=stub).process_all(path)
     assert len(data) == 2
-    assert set(data["extraction_method"]) == {"llm_pdf_text"}
-    assert stub.text_calls == 1
+    assert set(data["extraction_method"]) == {"llm_pdf_vision"}
+    assert stub.image_calls == 1
+    assert stub.text_calls == 0
 
 
-def test_digital_pdf_table_without_llm(tmp_path):
-    # 在 PDF 中绘制真实文字表格及线框，不依赖识别模型。
+def test_text_layer_pdf_table_requires_vision_llm(tmp_path):
+    # 即使 PDF 含文字表格和线框，也不能直接用 PyMuPDF 提取绕过大模型。
     cells = [
         ["date", "account", "credit", "debit", "balance", "purpose"],
         ["2026-03-01", "00123", "100", "0", "100", "payment"],
@@ -144,11 +145,22 @@ def test_digital_pdf_table_without_llm(tmp_path):
     path = tmp_path / "typed.pdf"
     document.save(path)
     document.close()
-    data, info = DataProcessor().process_all(path)
+    with pytest.raises(ValueError, match="必须通过视觉大模型"):
+        DataProcessor().process_all(path)
+
+    class TableVision(FakeVisionLLM):
+        def extract_image(self, image_bytes, media_type="image/png"):
+            super().extract_image(image_bytes, media_type)
+            return {"columns": cells[0], "rows": cells[1:], "bank_hint": ""}
+
+    model = TableVision()
+    data, info = DataProcessor(llm_client=model).process_all(path)
     assert len(data) == 2
-    assert set(data["extraction_method"]) == {"pdf_text_table"}
+    assert set(data["extraction_method"]) == {"llm_pdf_vision"}
     assert data["贷方发生额"].tolist() == [100, 0]
     assert info["balance_error_count"] == 0
+    assert model.image_calls == 1
+    assert model.text_calls == 0
 
 
 def test_bad_vision_output_and_remote_protection():
@@ -171,7 +183,7 @@ def test_pdf_page_limit(tmp_path):
     pdf.save(path)
     pdf.close()
     with pytest.raises(ValueError, match="超过最大 1 页"):
-        DataProcessor(max_pages=1).process_all(path)
+        DataProcessor(max_pages=1, llm_client=FakeVisionLLM()).process_all(path)
 
 
 def test_model_unreadable_amount_is_kept_for_manual_correction(tmp_path):
@@ -264,3 +276,47 @@ def test_openai_compatible_llm_payload_without_network(monkeypatch):
     assert observed["body"]["messages"][1]["content"][1]["type"] == "image_url"
     assert observed["authorization"] == "Bearer test-secret"
     assert observed["timeout"] == 180
+
+
+def test_pdf_every_page_including_blank_is_processed_by_vision(tmp_path):
+    doc = fitz.open()
+    doc.new_page().insert_text((40, 80), "Bank statement: page one")
+    doc.new_page()  # 空白页也交给模型判别，不根据文字层决定路由
+    doc.new_page().insert_text((40, 80), "Bank statement: page three")
+    path = tmp_path / "multipage.pdf"
+    doc.save(path)
+    doc.close()
+
+    class PageVision(FakeVisionLLM):
+        def extract_image(self, image_bytes, media_type="image/png"):
+            super().extract_image(image_bytes, media_type)
+            if self.image_calls == 2:
+                return {"columns": [], "rows": [], "notes": "空白页"}
+            return {"columns": COLS, "rows": ROWS, "bank_hint": "中国农业银行"}
+
+    client = PageVision()
+    frame, quality = DataProcessor(llm_client=client).process_all(path)
+    assert client.image_calls == 3
+    assert client.text_calls == 0
+    assert len(frame) == 4
+    assert sorted(frame["source_page"].unique().tolist()) == [1, 3]
+    assert len(quality["sources"]) == 3
+    assert all(item["extraction_method"] == "llm_pdf_vision" for item in quality["sources"])
+
+
+def test_pdf_page_failure_cannot_silently_skip(tmp_path):
+    doc = fitz.open()
+    doc.new_page().insert_text((40, 80), "Bank statement page one")
+    doc.new_page().insert_text((40, 80), "Bank statement page two")
+    path = tmp_path / "fail.pdf"
+    doc.save(path)
+    doc.close()
+
+    class FailingVision(FakeVisionLLM):
+        def extract_image(self, image_bytes, media_type="image/png"):
+            if self.image_calls == 1:
+                raise RuntimeError("synthetic model failure")
+            return super().extract_image(image_bytes, media_type)
+
+    with pytest.raises(ValueError, match="第 2 页"):
+        DataProcessor(llm_client=FailingVision()).process_all(path)
