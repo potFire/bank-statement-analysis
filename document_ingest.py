@@ -126,10 +126,11 @@ class UniversalStatementImporter:
 
     def _requires_llm(self, path, page):
         if self.llm_client is None:
+            kind = "PDF" if path.suffix.lower() == ".pdf" else "图片"
             raise ValueError(
-                f"{path.name} 第 {page} 页必须通过视觉大模型识别；"
-                "请配置 --llm-url 和 --llm-model（建议本地部署），"
-                "PDF 不再使用本地表格解析绕过模型"
+                f"{path.name} 第 {page} 页{kind}必须通过视觉大模型识别；"
+                "请配置本地视觉 LLM：--llm-url 和 --llm-model。"
+                "PDF 也不再使用本地表格提取绕过模型"
             )
 
     def _model_result(self, value, path, source_index, page, method, hint):
