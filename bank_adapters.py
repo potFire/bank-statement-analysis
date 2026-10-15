@@ -156,6 +156,10 @@ class BankAdapter(ABC):
         df["source_file"] = metadata["source_file"]
         df["source_sheet"] = metadata["source_sheet"]
         df["source_row"] = np.arange(len(df), dtype="int64") + metadata["header_row"] + 2
+        df["source_page"] = int(metadata.get("source_page", 0))
+        df["extraction_method"] = metadata.get("extraction_method", "excel_mapping")
+        df["recognition_score"] = float(metadata.get("recognition_score", 1.0))
+        df["review_required"] = bool(metadata.get("review_required", False))
         result = df.loc[:, list(STANDARD_COLUMNS)].copy()
         validate_standard_frame(result)
         return result

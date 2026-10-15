@@ -5,13 +5,14 @@
 """
 from typing import Iterable
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 STANDARD_COLUMNS = (
     "银行编码", "银行名称", "账号", "账户户名", "开户行", "币种",
     "交易日期", "交易时间", "交易流水号",
     "贷方发生额", "借方发生额", "余额",
     "对方账号", "对方户名", "对方开户行", "交易用途",
     "source_file", "source_sheet", "source_row",
+    "source_page", "extraction_method", "recognition_score", "review_required",
 )
 REQUIRED_FOR_ANALYSIS = (
     "银行编码", "账号", "交易日期",
