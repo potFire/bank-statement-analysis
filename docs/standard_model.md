@@ -1,6 +1,6 @@
-# 银行标准流水模型 v1
+# 银行标准流水模型 v1.1
 
-统一模型使用 pandas.DataFrame，字段名稳定，适配器必须输出 statement_schema.STANDARD_COLUMNS。一个 DataFrame 可以包含多家银行、多账号的交易，但目前币种必须为 CNY。
+统一模型使用 pandas.DataFrame，字段名稳定，适配器必须输出 statement_schema.STANDARD_COLUMNS（v1.1）。Excel、PDF 与图片均映射到相同字段；一个 DataFrame 可以包含多家银行、多账号的交易，但目前币种必须为 CNY。
 
 | 标准字段 | 类型（清洗后） | 说明 |
 | --- | --- | --- |
@@ -22,7 +22,11 @@
 | 交易用途 | string | 交易摘要，供分类及风险规则使用 |
 | source_file | string | 来源文件名 |
 | source_sheet | string | Excel 工作表 |
-| source_row | int | 来源 Excel 实际行号（从 1 开始） |
+| source_row | int | Excel 实际行号；PDF/图片为识别表格中的行号（需与页码联合定位） |
+| source_page | int | Excel 为 0；PDF/图片从 1 开始的页码 |
+| extraction_method | string | excel_mapping / pdf_text_table / llm_pdf_text / llm_pdf_vision / llm_image_vision |
+| recognition_score | number | 字段覆盖率与数据可解析性构成的结构评分；不是识别正确率 |
+| review_required | boolean | 是否要求人工逐笔确认 |
 
 注意：适配层严格区分借贷金额方向，任何无法判断方向的记录都停止解析。金额校验拒绝负的拆分收入/支出金额和同笔借贷双正值。数值计算使用 pandas 浮点数，银行生产级金额精度仍需引入整数分/Decimal 复核。日志和报告中的源行号需配合文件与工作表三元组使用。
 
