@@ -24,7 +24,7 @@
 | source_sheet | string | Excel 工作表 |
 | source_row | int | Excel 实际行号；PDF/图片为识别表格中的行号（需与页码联合定位） |
 | source_page | int | Excel 为 0；PDF/图片从 1 开始的页码 |
-| extraction_method | string | excel_mapping / pdf_text_table / llm_pdf_text / llm_pdf_vision / llm_image_vision |
+| extraction_method | string | excel_mapping / llm_pdf_vision / llm_image_vision（PDF 不使用文本表格直解析） |
 | recognition_score | number | 字段覆盖率与数据可解析性构成的结构评分；不是识别正确率 |
 | review_required | boolean | 是否要求人工逐笔确认 |
 

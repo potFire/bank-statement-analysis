@@ -6,7 +6,7 @@
 
 Excel / PDF / 图片 → 多模态输入识别 → BankAdapter（模板映射与转码） → 统一流水模型 v1.1 → DataProcessor（质量校验） → MetricsCalculator（通用计算） → risk_rules（风险线索） → ReportGenerator（Word / Markdown / JSON）。
 
-* vision_llm.py / document_ingest.py：本地优先的视觉 LLM、PDF/图片表格解析、来源页码及识别结构评分
+* vision_llm.py / document_ingest.py：本地优先的视觉 LLM、PDF 逐页图像渲染及识别、来源页码和结构评分
 * review_workflow.py：识别逐笔复核工作簿、复核状态和来源行完整性校验
 * bank_adapters.py：BankAdapter 抽象基类、ABC / ICBC / CCB 初始模板、GENERIC 适配器、自定义 JSON 模板、多个 Excel 工作表导入
 * statement_schema.py：STANDARD_COLUMNS，所有适配器必须满足的标准流水字段约定
@@ -39,11 +39,13 @@ python main.py other.xlsx --bank CUSTOM --profile config/example_bank.json --com
 
 ## PDF、图片与 LLM 识别
 
-具有表格线和文本层的 PDF 可先使用本地 PDF 表格提取；扫描 PDF、手机拍摄图片以及无法确定表格的 PDF 需要配置能够接收图片的 OpenAI-compatible 模型。
+所有 PDF（文字型、带表格线、扫描件）**统一由视觉大模型逐页识别**，PyMuPDF 仅用于将 PDF 每页渲染成图片，不再使用文本表格直接提取。PNG/JPG 等图片也走相同的视觉识别接口。模型需支持 OpenAI-compatible 的 image_url 多模态请求。
 
 ~~~bash
-# 可解析文字表格的 PDF，无需 LLM
-python main.py company.pdf --company "样例企业" --output output
+# 所有 PDF 均要求视觉模型，含文字层 PDF 也一样
+python main.py company.pdf --company "样例企业" --output output \
+  --llm-url http://127.0.0.1:11434/v1/chat/completions \
+  --llm-model your-local-vision-model
 
 # 本机部署的视觉模型（仅示例，请使用实际可用的模型 ID）
 python main.py scan.pdf photo.png --company "样例企业" --output output \
@@ -63,7 +65,7 @@ python main.py photo.png --company "样例企业" --allow-unreviewed \
 
 本地模型默认不需要 API Key；若模型服务需要认证，将令牌放入 BANK_LLM_API_KEY 环境变量。远程模型需要 --allow-remote-llm 显式授权，且仅允许 HTTPS。**严禁将未授权的银行流水上传到外部模型。**
 
-图片支持 PNG、JPG/JPEG、WebP、BMP、TIFF；默认每份 PDF/多页图片最多 200 页，单张图片最多 3000 万像素。LLM 提取的记录全部默认待复核，并保留 PDF 页码和文件来源；可修改原始金额、日期，但复核时不能删减原始识别行或改动证据定位字段。
+图片支持 PNG、JPG/JPEG、WebP、BMP、TIFF；PDF 按约 200 DPI 逐页渲染，默认每份 PDF/多页图片最多 200 页，单张图片最多 3000 万像素。LLM 提取的记录全部默认待复核，并保留 PDF 页码和文件来源；可修改原始金额、日期，但复核时不能删减原始识别行或改动证据定位字段。
 
 详细见 [多模态识别说明](docs/multimodal_ingestion.md)。
 
@@ -73,7 +75,7 @@ python main.py photo.png --company "样例企业" --allow-unreviewed \
 
 ## 限制与边界
 
-* 支持 Excel（xls/xlsx）、PDF 和图片。PDF 表格直接解析，扫描 PDF/图片使用视觉 LLM；不保证任何文件真实性，不提供对手方外部交叉验证。
+* 支持 Excel（xls/xlsx）、PDF 和图片。**PDF 全部由视觉模型逐页识别**，不因文本层或表格线绕过模型。模型输出可能漏行、错列、识别金额错误；须逐页核对原件，不保证文件真实性，不做外部交叉验证。
 * 支持 ABC/ICBC/CCB 的常见字段示例和自定义模板，并未针对各行真实导出格式做端到端验收。
 * 默认严格限制人民币 CNY，外币数据会停止分析，避免不同币种直接相加。
 * 无法自动识别银行时使用 GENERIC 通用表头映射，但按源文件、工作表生成临时银行标识，不把来源不明的同号账户误认为同一账户。
