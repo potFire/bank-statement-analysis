@@ -233,3 +233,34 @@ def test_source_lineage_rejects_rewritten_page_or_row(tmp_path):
     book.save(review)
     with pytest.raises(ValueError, match="原始文件、页码或行号"):
         read_approved_workbook(review)
+
+
+def test_openai_compatible_llm_payload_without_network(monkeypatch):
+    import json
+    import vision_llm
+    from vision_llm import VisionLLM
+    response_content = json.dumps({
+        "columns": COLS, "rows": ROWS, "bank_hint": "农行",
+    }, ensure_ascii=False)
+    observed = {}
+
+    def fake_urlopen(req, timeout):
+        observed["body"] = json.loads(req.data.decode("utf-8"))
+        observed["authorization"] = req.get_header("Authorization")
+        observed["timeout"] = timeout
+        return BytesIO(json.dumps({
+            "choices": [{"message": {"content": response_content}}]
+        }).encode("utf-8"))
+
+    monkeypatch.setattr(vision_llm.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("BANK_LLM_API_KEY", "test-secret")
+    client = VisionLLM(LLMSettings(
+        url="http://127.0.0.1:11434/v1/chat/completions",
+        model="test-vision-model",
+    ))
+    result = client.extract_image(b"synthetic-image-bytes")
+    assert result["rows"] == ROWS
+    assert observed["body"]["model"] == "test-vision-model"
+    assert observed["body"]["messages"][1]["content"][1]["type"] == "image_url"
+    assert observed["authorization"] == "Bearer test-secret"
+    assert observed["timeout"] == 180
