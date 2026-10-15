@@ -172,3 +172,64 @@ def test_pdf_page_limit(tmp_path):
     pdf.close()
     with pytest.raises(ValueError, match="超过最大 1 页"):
         DataProcessor(max_pages=1).process_all(path)
+
+
+def test_model_unreadable_amount_is_kept_for_manual_correction(tmp_path):
+    class UnclearModel(FakeVisionLLM):
+        def extract_image(self, image_bytes, media_type="image/png"):
+            super().extract_image(image_bytes, media_type)
+            wrong = [row.copy() for row in ROWS]
+            wrong[0][2] = "无法辨认"
+            return {"columns": COLS, "rows": wrong, "bank_hint": "中国农业银行"}
+
+    image = tmp_path / "unclear.png"
+    Image.new("RGB", (300, 180), "white").save(image)
+    review = Path(analyze(image, "样例", tmp_path / "out", llm_client=UnclearModel()))
+    book = load_workbook(review)
+    tab = book["标准流水复核"]
+    headers = [cell.value for cell in tab[1]]
+    amount_col = headers.index("贷方发生额") + 1
+    status_col = headers.index("审核状态") + 1
+    assert tab.cell(2, amount_col).value == "无法辨认"
+    tab.cell(2, status_col, "已确认")
+    tab.cell(3, status_col, "已确认")
+    book.save(review)
+    with pytest.raises(ValueError, match="仍存在无法解析"):
+        analyze(None, "样例", tmp_path / "out", reviewed_xlsx=review)
+    book = load_workbook(review)
+    tab = book["标准流水复核"]
+    tab.cell(2, amount_col, "90000.00")
+    book.save(review)
+    output = Path(analyze(None, "样例", tmp_path / "out", reviewed_xlsx=review))
+    assert output.exists()
+
+
+def test_source_lineage_rejects_removed_transaction(tmp_path):
+    photo = tmp_path / "scan.png"
+    Image.new("RGB", (300, 160), "white").save(photo)
+    review = Path(analyze(photo, "样例", tmp_path / "out", llm_client=FakeVisionLLM()))
+    book = load_workbook(review)
+    tab = book["标准流水复核"]
+    col = [cell.value for cell in tab[1]].index("审核状态") + 1
+    tab.cell(2, col, "已确认")
+    tab.delete_rows(3)
+    book.save(review)
+    with pytest.raises(ValueError, match="行数"):
+        read_approved_workbook(review)
+
+
+def test_source_lineage_rejects_rewritten_page_or_row(tmp_path):
+    photo = tmp_path / "scan.png"
+    Image.new("RGB", (300, 160), "white").save(photo)
+    review = Path(analyze(photo, "样例", tmp_path / "out", llm_client=FakeVisionLLM()))
+    book = load_workbook(review)
+    tab = book["标准流水复核"]
+    header = [cell.value for cell in tab[1]]
+    status_col = header.index("审核状态") + 1
+    row_col = header.index("source_row") + 1
+    for row in (2, 3):
+        tab.cell(row, status_col, "已确认")
+    tab.cell(2, row_col, 999)
+    book.save(review)
+    with pytest.raises(ValueError, match="原始文件、页码或行号"):
+        read_approved_workbook(review)
