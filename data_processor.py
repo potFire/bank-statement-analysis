@@ -41,7 +41,7 @@ class DataProcessor:
 
     def read_excel(self, paths):
         self.raw_data, self.import_sources = self.importer.read(paths)
-        self.account_info = self.import_sources[0]["account_info"] if len(self.import_sources) == 1 else {}
+        self.account_info = self.import_sources[0].get("account_info", {}) if len(self.import_sources) == 1 else {}
         return self.raw_data
 
     def standardize_columns(self):
