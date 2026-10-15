@@ -146,9 +146,12 @@ class BankAdapter(ABC):
                 df[col] = default
         for col in ("账号", "账户户名", "开户行"):
             df[col] = df[col].fillna("").replace("", defaults[col])
+        # 未识别银行时，同账号也可能属于不同银行。按来源 Sheet 隔离，避免误合并。
+        if self.profile.code == "GENERIC":
+            df["银行编码"] = f"GENERIC_SOURCE_{metadata['source_index']}_SHEET_{metadata['sheet_index']}"
         # 不能把未知账号的不同工作表混成一个账户
         if df["账号"].fillna("").astype(str).str.strip().eq("").any():
-            unknown_id = f"UNSPECIFIED:{metadata['source_file']}:{metadata['source_sheet']}"
+            unknown_id = f"UNSPECIFIED:{metadata['source_index']}:{metadata['sheet_index']}"
             df["账号"] = df["账号"].fillna("").replace("", unknown_id)
         df["source_file"] = metadata["source_file"]
         df["source_sheet"] = metadata["source_sheet"]
@@ -265,12 +268,12 @@ class StatementImporter:
         if not paths:
             raise ValueError("至少提供一个流水文件")
         frames, sources = [], []
-        for name in paths:
+        for source_index, name in enumerate(paths, start=1):
             path = Path(name)
             if path.suffix.lower() not in (".xls", ".xlsx"):
                 raise ValueError(f"不支持的文件后缀: {path.name}")
             with pd.ExcelFile(path) as workbook:
-                for sheet in workbook.sheet_names:
+                for sheet_index, sheet in enumerate(workbook.sheet_names, start=1):
                     preview = pd.read_excel(workbook, sheet_name=sheet, header=None, nrows=50, dtype=str)
                     header_row = _find_header(preview, self.registry.adapters.values())
                     if header_row is None:
@@ -286,6 +289,8 @@ class StatementImporter:
                         "source_file": path.name,
                         "source_sheet": sheet,
                         "header_row": header_row,
+                        "source_index": source_index,
+                        "sheet_index": sheet_index,
                         "account_info": _account_info(pre),
                     }
                     canonical = adapter.normalize(raw, meta)
