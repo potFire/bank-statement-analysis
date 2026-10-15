@@ -49,7 +49,7 @@ class MetricsCalculator:
   if len(d):
    start=d["交易日期"].min().normalize();end=d["交易日期"].max().normalize()
    calendar=pd.date_range(start,end,freq="D")
-   for account,g in d.groupby("账号"):
+   for account,g in d.groupby([c for c in ("银行编码","账号","币种") if c in d.columns],dropna=False):
     last=g.groupby(g["交易日期"].dt.normalize())["余额"].last().sort_index()
     balance_series=last.reindex(calendar).ffill()
     # 未知区间前期余额，依首笔交易反推，且仅用于该首笔交易之前的自然日
