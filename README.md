@@ -4,7 +4,52 @@
 
 ## 架构
 
-Excel / PDF / 图片 → 多模态输入识别 → BankAdapter（模板映射与转码） → 统一流水模型 v1.1 → DataProcessor（质量校验） → MetricsCalculator（通用计算） → risk_rules（风险线索） → ReportGenerator（Word / Markdown / JSON）。
+下面的系统架构图对应当前已实现的处理链路，展示不同格式流水如何统一进入分析引擎：
+
+```mermaid
+flowchart TB
+    subgraph INPUT["输入层"]
+        EXCEL["Excel 流水<br/>农行 / 工行 / 建行 / 其他银行"]
+        PDF["PDF 流水<br/>文字型 / 扫描件"]
+        IMAGE["图片流水<br/>PNG / JPG / WebP / BMP / TIFF"]
+    end
+
+    subgraph INGEST["识别与标准化层"]
+        EXCEL_PARSE["Excel 解析与表头识别<br/>StatementImporter"]
+        PDF_RENDER["逐页渲染为 PNG<br/>PyMuPDF"]
+        IMG_PREP["图像预处理"]
+        VISION["视觉大模型提取交易 JSON<br/>VisionLLM"]
+        ADAPTER["银行适配器与收支方向映射<br/>BankAdapter"]
+        STANDARD["统一流水模型 v1.1<br/>标准字段 + 来源文件 / 页码 / 行号"]
+    end
+
+    subgraph ANALYSIS["复核与通用分析层"]
+        GATE{"是否需要人工复核？"}
+        REVIEW_FILE["生成逐笔复核清单<br/>recognition_review.xlsx + manifest"]
+        REVIEW["人工核对原始流水并确认"]
+        QUALITY["数据清洗与质量校验<br/>DataProcessor"]
+        METRICS["现金流、稳定性、季节性等指标<br/>MetricsCalculator"]
+        RISK["大额交易、资金回流等异常线索<br/>risk_rules.py"]
+    end
+
+    REPORT["分析报告与明细<br/>Word / Markdown / JSON"]
+    PROFILE[("银行模板 / JSON 配置")]
+    MODEL[("本地优先的视觉模型<br/>OpenAI-compatible API")]
+
+    EXCEL --> EXCEL_PARSE --> ADAPTER
+    PDF --> PDF_RENDER --> VISION
+    IMAGE --> IMG_PREP --> VISION
+    MODEL -.-> VISION
+    VISION --> ADAPTER
+    PROFILE -.-> ADAPTER
+    ADAPTER --> STANDARD --> GATE
+    GATE -->|"PDF / 图片：默认待复核"| REVIEW_FILE
+    REVIEW_FILE --> REVIEW --> QUALITY
+    GATE -->|"Excel：默认直接处理"| QUALITY
+    QUALITY --> METRICS --> RISK --> REPORT
+```
+
+说明：**所有 PDF 均先逐页渲染，再由视觉大模型识别**，不会因 PDF 含文字层或表格线而绕过模型；图片同样走视觉识别。PDF / 图片识别结果默认需要人工复核，确认后才进入正式分析；`--allow-unreviewed` 仅供开发时生成带提示的草稿。当前未实现模板自学习和外部交叉验证。
 
 * vision_llm.py / document_ingest.py：本地优先的视觉 LLM、PDF 逐页图像渲染及识别、来源页码和结构评分
 * review_workflow.py：识别逐笔复核工作簿、复核状态和来源行完整性校验
